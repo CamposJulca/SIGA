@@ -3,6 +3,7 @@ Vistas REST para el módulo Beneficios de Salud (SIGA).
 """
 import hashlib
 import os
+from decimal import Decimal
 
 from django.conf import settings
 from rest_framework import status
@@ -10,17 +11,28 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import ArchivoRecibido, BeneficioSalud, ErrorProcesamiento
+from .models import (
+    ArchivoRecibido, BeneficioSalud, ErrorProcesamiento,
+    PoliticaPrepagada, PensionadoPrepagada, AuxilioExterno,
+    PlanillaCalculo, DetalleCalculo,
+)
 from .serializers import (
     ArchivoRecibidoListSerializer,
     ArchivoRecibidoDetailSerializer,
     BeneficioSaludSerializer,
+    PoliticaPrepagadaSerializer,
+    PensionadoPrepagadaSerializer,
+    AuxilioExternoSerializer,
+    PlanillaCalculoListSerializer,
+    PlanillaCalculoDetailSerializer,
+    DetalleCalculoSerializer,
 )
 from .services.detector import detectar_proveedor
 from .services.reader_excel import leer_excel
 from .services.axa_adapter import adaptar_axa
 from .services.colsanitas_adapter import adaptar_colsanitas
 from .services.validator import validar_registros
+from .services import prepagada_service
 
 
 def _sha256_archivo(file_obj) -> str:
@@ -613,5 +625,655 @@ class DashboardView(APIView):
                 'beneficiarios_ultimo_periodo': consolidado_agg['beneficiarios'] or 0,
                 'valor_total_ultimo_periodo':   float(consolidado_agg['valor_total'] or 0),
                 'proveedores_activos':          len(ultimos_periodos),
+            },
+        })
+
+
+# ===========================================================================
+# Medicina Prepagada views
+# ===========================================================================
+
+class CruceView(APIView):
+    """
+    GET /api/beneficios-salud/cruce/?periodo=MMYYYY
+    Retorna registros de v_cruce para el periodo indicado,
+    junto con la lista de periodos disponibles.
+    """
+
+    def get(self, request, *args, **kwargs):
+        try:
+            periodos = prepagada_service.get_periodos_disponibles()
+        except RuntimeError as e:
+            return Response({'error': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        periodo = request.query_params.get('periodo')
+        if not periodo:
+            return Response({
+                'periodos_disponibles': periodos,
+                'cruce': [],
+            })
+
+        try:
+            cruce = prepagada_service.get_cruce_periodo(periodo)
+        except RuntimeError as e:
+            return Response({'error': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        return Response({
+            'periodo': periodo,
+            'periodos_disponibles': periodos,
+            'total': len(cruce),
+            'cruce': cruce,
+        })
+
+
+class PoliticaView(APIView):
+    """
+    GET  /api/beneficios-salud/politica/ → lista todas las políticas (más reciente primero)
+    POST /api/beneficios-salud/politica/ → crea una nueva política
+    """
+
+    def get(self, request, *args, **kwargs):
+        qs = PoliticaPrepagada.objects.all()
+        serializer = PoliticaPrepagadaSerializer(qs, many=True)
+        return Response(serializer.data)
+
+    def post(self, request, *args, **kwargs):
+        data = request.data.copy()
+        if not data.get('creada_por') and request.user and request.user.is_authenticated:
+            data['creada_por'] = request.user.username
+        serializer = PoliticaPrepagadaSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class PoliticaDetailView(APIView):
+    """
+    GET /api/beneficios-salud/politica/<pk>/
+    PUT /api/beneficios-salud/politica/<pk>/
+    """
+
+    def _get_object(self, pk):
+        try:
+            return PoliticaPrepagada.objects.get(pk=pk)
+        except PoliticaPrepagada.DoesNotExist:
+            return None
+
+    def get(self, request, pk, *args, **kwargs):
+        obj = self._get_object(pk)
+        if obj is None:
+            return Response({'error': f'Política con id={pk} no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(PoliticaPrepagadaSerializer(obj).data)
+
+    def put(self, request, pk, *args, **kwargs):
+        obj = self._get_object(pk)
+        if obj is None:
+            return Response({'error': f'Política con id={pk} no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = PoliticaPrepagadaSerializer(obj, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class PensionadosView(APIView):
+    """
+    GET  /api/beneficios-salud/pensionados/ → lista todos (activos por defecto)
+    POST /api/beneficios-salud/pensionados/ → crea nuevo
+    """
+
+    def get(self, request, *args, **kwargs):
+        qs = PensionadoPrepagada.objects.all()
+        solo_activos = request.query_params.get('activo', '').lower()
+        if solo_activos in ('1', 'true', 'yes'):
+            qs = qs.filter(activo=True)
+        serializer = PensionadoPrepagadaSerializer(qs, many=True)
+        return Response(serializer.data)
+
+    def post(self, request, *args, **kwargs):
+        serializer = PensionadoPrepagadaSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class PensionadoDetailView(APIView):
+    """
+    GET    /api/beneficios-salud/pensionados/<pk>/
+    PUT    /api/beneficios-salud/pensionados/<pk>/
+    DELETE /api/beneficios-salud/pensionados/<pk>/
+    """
+
+    def _get_object(self, pk):
+        try:
+            return PensionadoPrepagada.objects.get(pk=pk)
+        except PensionadoPrepagada.DoesNotExist:
+            return None
+
+    def get(self, request, pk, *args, **kwargs):
+        obj = self._get_object(pk)
+        if obj is None:
+            return Response({'error': f'Pensionado con id={pk} no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(PensionadoPrepagadaSerializer(obj).data)
+
+    def put(self, request, pk, *args, **kwargs):
+        obj = self._get_object(pk)
+        if obj is None:
+            return Response({'error': f'Pensionado con id={pk} no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = PensionadoPrepagadaSerializer(obj, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk, *args, **kwargs):
+        obj = self._get_object(pk)
+        if obj is None:
+            return Response({'error': f'Pensionado con id={pk} no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AuxilioExternoView(APIView):
+    """
+    GET  /api/beneficios-salud/auxilio-externo/ → lista todos
+    POST /api/beneficios-salud/auxilio-externo/ → crea nuevo
+    """
+
+    def get(self, request, *args, **kwargs):
+        qs = AuxilioExterno.objects.all()
+        solo_activos = request.query_params.get('activo', '').lower()
+        if solo_activos in ('1', 'true', 'yes'):
+            qs = qs.filter(activo=True)
+        serializer = AuxilioExternoSerializer(qs, many=True)
+        return Response(serializer.data)
+
+    def post(self, request, *args, **kwargs):
+        serializer = AuxilioExternoSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AuxilioExternoDetailView(APIView):
+    """
+    GET    /api/beneficios-salud/auxilio-externo/<pk>/
+    PUT    /api/beneficios-salud/auxilio-externo/<pk>/
+    DELETE /api/beneficios-salud/auxilio-externo/<pk>/
+    """
+
+    def _get_object(self, pk):
+        try:
+            return AuxilioExterno.objects.get(pk=pk)
+        except AuxilioExterno.DoesNotExist:
+            return None
+
+    def get(self, request, pk, *args, **kwargs):
+        obj = self._get_object(pk)
+        if obj is None:
+            return Response({'error': f'Auxilio externo con id={pk} no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(AuxilioExternoSerializer(obj).data)
+
+    def put(self, request, pk, *args, **kwargs):
+        obj = self._get_object(pk)
+        if obj is None:
+            return Response({'error': f'Auxilio externo con id={pk} no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = AuxilioExternoSerializer(obj, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk, *args, **kwargs):
+        obj = self._get_object(pk)
+        if obj is None:
+            return Response({'error': f'Auxilio externo con id={pk} no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PlanillaCalcularView(APIView):
+    """
+    POST /api/beneficios-salud/planilla/calcular/
+    Body: {"periodo": "MMYYYY", "politica_id": X (opcional)}
+    Calcula la planilla 80/20, guarda PlanillaCalculo + DetalleCalculo y retorna el resultado.
+    """
+
+    def post(self, request, *args, **kwargs):
+        periodo = request.data.get('periodo')
+        if not periodo:
+            return Response({'error': 'El campo "periodo" es requerido.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        politica_id = request.data.get('politica_id')
+        if politica_id:
+            try:
+                politica = PoliticaPrepagada.objects.get(pk=politica_id)
+            except PoliticaPrepagada.DoesNotExist:
+                return Response(
+                    {'error': f'Política con id={politica_id} no encontrada.'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        else:
+            politica = PoliticaPrepagada.objects.order_by('-vigente_desde').first()
+            if politica is None:
+                return Response(
+                    {'error': 'No existe ninguna política definida. Cree una política antes de calcular.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        try:
+            resultados = prepagada_service.calcular_planilla(periodo, politica)
+        except RuntimeError as e:
+            return Response({'error': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        # Calcular totales (solo empleados con estado OK)
+        empleados_ok = [r for r in resultados if r['estado_cruce'] == 'OK']
+        total_empresa = sum(r['valor_empresa'] for r in empleados_ok)
+        total_empleado = sum(r['valor_empleado'] for r in empleados_ok)
+        total_gravable = sum(r['apoyo_gravable'] for r in empleados_ok)
+        total_no_gravable = sum(r['apoyo_no_gravable'] for r in empleados_ok)
+
+        generada_por = 'anonimo'
+        if request.user and request.user.is_authenticated:
+            generada_por = request.user.username
+
+        planilla = PlanillaCalculo.objects.create(
+            periodo=periodo,
+            politica=politica,
+            total_empleados=len(empleados_ok),
+            total_empresa=round(total_empresa, 2),
+            total_empleado=round(total_empleado, 2),
+            total_gravable=round(total_gravable, 2),
+            total_no_gravable=round(total_no_gravable, 2),
+            generada_por=generada_por,
+        )
+
+        detalles_bulk = [
+            DetalleCalculo(planilla=planilla, **r)
+            for r in resultados
+        ]
+        DetalleCalculo.objects.bulk_create(detalles_bulk, batch_size=500)
+
+        serializer = PlanillaCalculoDetailSerializer(planilla)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class PlanillaListView(APIView):
+    """
+    GET /api/beneficios-salud/planilla/
+    Lista todas las planillas de cálculo.
+    """
+
+    def get(self, request, *args, **kwargs):
+        qs = PlanillaCalculo.objects.select_related('politica').all()
+        periodo = request.query_params.get('periodo')
+        if periodo:
+            qs = qs.filter(periodo=periodo)
+        serializer = PlanillaCalculoListSerializer(qs, many=True)
+        return Response(serializer.data)
+
+
+class PlanillaDetailView(APIView):
+    """
+    GET /api/beneficios-salud/planilla/<pk>/
+    Detalle de planilla con todos sus registros de DetalleCalculo.
+    """
+
+    def get(self, request, pk, *args, **kwargs):
+        try:
+            planilla = PlanillaCalculo.objects.select_related('politica').get(pk=pk)
+        except PlanillaCalculo.DoesNotExist:
+            return Response({'error': f'Planilla con id={pk} no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = PlanillaCalculoDetailSerializer(planilla)
+        return Response(serializer.data)
+
+
+class PlanillaExportarView(APIView):
+    """
+    GET /api/beneficios-salud/planilla/<pk>/exportar/
+    Exporta la planilla a Excel (.xlsx).
+    Hoja 1: "Planilla 80-20" — todos los empleados.
+    Hoja 2: "Apoyo Gravable" — solo los que tienen apoyo_gravable > 0.
+    """
+
+    COLUMNAS = [
+        ('cedula', 'Cédula'),
+        ('nombre_en_kactus', 'Nombre Kactus'),
+        ('eps', 'EPS'),
+        ('num_beneficiarios', 'N° Beneficiarios'),
+        ('total_familia', 'Total Familia'),
+        ('valor_empresa', 'Valor Empresa'),
+        ('valor_empleado', 'Valor Empleado'),
+        ('apoyo_no_gravable', 'Apoyo No Gravable'),
+        ('apoyo_gravable', 'Apoyo Gravable'),
+        ('estado_cruce', 'Estado Cruce'),
+    ]
+
+    def get(self, request, pk, *args, **kwargs):
+        from io import BytesIO
+        from datetime import date
+        import openpyxl
+        from openpyxl.styles import PatternFill, Font
+        from django.http import HttpResponse
+
+        try:
+            planilla = PlanillaCalculo.objects.select_related('politica').get(pk=pk)
+        except PlanillaCalculo.DoesNotExist:
+            return Response({'error': f'Planilla con id={pk} no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+
+        detalles = list(planilla.detalles.all().values(
+            'cedula', 'nombre_en_kactus', 'eps', 'num_beneficiarios',
+            'total_familia', 'valor_empresa', 'valor_empleado',
+            'apoyo_no_gravable', 'apoyo_gravable', 'estado_cruce',
+        ))
+
+        wb = openpyxl.Workbook()
+        header_fill = PatternFill(start_color='00853f', end_color='00853f', fill_type='solid')
+        header_font = Font(color='FFFFFF', bold=True)
+        yellow_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
+
+        def _escribir_hoja(ws, filas):
+            # Encabezado
+            for col_idx, (campo, titulo) in enumerate(self.COLUMNAS, start=1):
+                cell = ws.cell(row=1, column=col_idx, value=titulo)
+                cell.fill = header_fill
+                cell.font = header_font
+            # Datos
+            for row_idx, reg in enumerate(filas, start=2):
+                tiene_gravable = (reg.get('apoyo_gravable') or 0) > 0
+                for col_idx, (campo, _) in enumerate(self.COLUMNAS, start=1):
+                    valor = reg.get(campo)
+                    # Convertir Decimal a float para openpyxl
+                    if hasattr(valor, 'is_finite'):
+                        valor = float(valor)
+                    cell = ws.cell(row=row_idx, column=col_idx, value=valor)
+                    if tiene_gravable:
+                        cell.fill = yellow_fill
+
+        # Hoja 1 — Planilla completa
+        ws1 = wb.active
+        ws1.title = 'Planilla 80-20'
+        _escribir_hoja(ws1, detalles)
+
+        # Hoja 2 — Solo apoyo gravable
+        ws2 = wb.create_sheet(title='Apoyo Gravable')
+        gravables = [r for r in detalles if (r.get('apoyo_gravable') or 0) > 0]
+        _escribir_hoja(ws2, gravables)
+
+        buffer = BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        fecha_hoy = date.today().strftime('%Y%m%d')
+        nombre_archivo = f'SIGA_Prepagada_{planilla.periodo}_{fecha_hoy}.xlsx'
+
+        response = HttpResponse(
+            buffer.read(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response['Content-Disposition'] = f'attachment; filename="{nombre_archivo}"'
+        return response
+
+
+class CausacionView(APIView):
+    """
+    GET /api/beneficios-salud/causacion/?periodo=MMYYYY
+    Resumen por EPS de la planilla del periodo indicado.
+    """
+
+    def get(self, request, *args, **kwargs):
+        periodo = request.query_params.get('periodo')
+        if not periodo:
+            return Response({'error': 'El parámetro "periodo" es requerido.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Obtener la planilla más reciente del periodo
+        planilla = PlanillaCalculo.objects.filter(periodo=periodo).order_by('-generada_en').first()
+        if planilla is None:
+            return Response(
+                {'error': f'No existe planilla calculada para el periodo "{periodo}".'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        from django.db.models import Sum, Count
+
+        resumen_eps = (
+            DetalleCalculo.objects
+            .filter(planilla=planilla, estado_cruce='OK')
+            .values('eps')
+            .annotate(
+                num_empleados=Count('id'),
+                total_empresa=Sum('valor_empresa'),
+                total_empleado=Sum('valor_empleado'),
+                total_general=Sum('total_familia'),
+                apoyo_no_gravable=Sum('apoyo_no_gravable'),
+                apoyo_gravable=Sum('apoyo_gravable'),
+            )
+            .order_by('eps')
+        )
+
+        resultado = []
+        for row in resumen_eps:
+            resultado.append({
+                'eps': row['eps'],
+                'num_empleados': row['num_empleados'],
+                'total_empresa': float(row['total_empresa'] or 0),
+                'total_empleado': float(row['total_empleado'] or 0),
+                'total_general': float(row['total_general'] or 0),
+                'apoyo_no_gravable': float(row['apoyo_no_gravable'] or 0),
+                'apoyo_gravable': float(row['apoyo_gravable'] or 0),
+            })
+
+        return Response({
+            'periodo': periodo,
+            'planilla_id': planilla.id,
+            'generada_en': planilla.generada_en,
+            'por_eps': resultado,
+            'totales': {
+                'total_empresa': float(planilla.total_empresa),
+                'total_empleado': float(planilla.total_empleado),
+                'total_gravable': float(planilla.total_gravable),
+                'total_no_gravable': float(planilla.total_no_gravable),
+                'total_empleados': planilla.total_empleados,
+            },
+        })
+
+
+class ConciliacionView(APIView):
+    """
+    GET /api/beneficios-salud/conciliacion/?periodo_nuevo=X&periodo_anterior=Y
+    Compara dos planillas (por periodo) y retorna novedades: nuevos, retirados, cambios de valor.
+    Usa las planillas más recientes de cada periodo.
+    """
+
+    def get(self, request, *args, **kwargs):
+        periodo_nuevo = request.query_params.get('periodo_nuevo')
+        periodo_anterior = request.query_params.get('periodo_anterior')
+
+        if not periodo_nuevo or not periodo_anterior:
+            return Response(
+                {'error': 'Se requieren los parámetros "periodo_nuevo" y "periodo_anterior".'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        planilla_nueva = PlanillaCalculo.objects.filter(periodo=periodo_nuevo).order_by('-generada_en').first()
+        planilla_anterior = PlanillaCalculo.objects.filter(periodo=periodo_anterior).order_by('-generada_en').first()
+
+        if planilla_nueva is None:
+            return Response(
+                {'error': f'No existe planilla para el periodo nuevo "{periodo_nuevo}".'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        if planilla_anterior is None:
+            return Response(
+                {'error': f'No existe planilla para el periodo anterior "{periodo_anterior}".'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        detalles_nuevos = {
+            d['cedula']: d
+            for d in planilla_nueva.detalles.filter(estado_cruce='OK').values(
+                'cedula', 'nombre_en_kactus', 'eps', 'total_familia', 'valor_empresa'
+            )
+        }
+        detalles_anteriores = {
+            d['cedula']: d
+            for d in planilla_anterior.detalles.filter(estado_cruce='OK').values(
+                'cedula', 'nombre_en_kactus', 'eps', 'total_familia', 'valor_empresa'
+            )
+        }
+
+        cedulas_nuevas = set(detalles_nuevos.keys())
+        cedulas_anteriores = set(detalles_anteriores.keys())
+
+        nuevos = [
+            {
+                'cedula': c,
+                'nombre': detalles_nuevos[c]['nombre_en_kactus'],
+                'eps': detalles_nuevos[c]['eps'],
+                'total_familia': float(detalles_nuevos[c]['total_familia'] or 0),
+            }
+            for c in sorted(cedulas_nuevas - cedulas_anteriores)
+        ]
+
+        retirados = [
+            {
+                'cedula': c,
+                'nombre': detalles_anteriores[c]['nombre_en_kactus'],
+                'eps': detalles_anteriores[c]['eps'],
+                'total_familia': float(detalles_anteriores[c]['total_familia'] or 0),
+            }
+            for c in sorted(cedulas_anteriores - cedulas_nuevas)
+        ]
+
+        cambios_valor = []
+        sin_cambios = 0
+        for c in cedulas_nuevas & cedulas_anteriores:
+            vn = float(detalles_nuevos[c]['valor_empresa'] or 0)
+            va = float(detalles_anteriores[c]['valor_empresa'] or 0)
+            if abs(vn - va) > 1.0:
+                cambios_valor.append({
+                    'cedula': c,
+                    'nombre': detalles_nuevos[c]['nombre_en_kactus'],
+                    'eps': detalles_nuevos[c]['eps'],
+                    'valor_anterior': va,
+                    'valor_nuevo': vn,
+                    'diferencia': round(vn - va, 2),
+                })
+            else:
+                sin_cambios += 1
+
+        return Response({
+            'periodo_nuevo': periodo_nuevo,
+            'periodo_anterior': periodo_anterior,
+            'resumen': {
+                'nuevos': len(nuevos),
+                'retirados': len(retirados),
+                'cambios_valor': len(cambios_valor),
+                'sin_cambios': sin_cambios,
+            },
+            'nuevos': nuevos,
+            'retirados': retirados,
+            'cambios_valor': cambios_valor,
+        })
+
+
+class InformeEFRView(APIView):
+    """
+    GET /api/beneficios-salud/informe-efr/?periodo=MMYYYY
+    Informe mensual EFR combinando:
+      - Datos de planilla (si existe para el periodo)
+      - Pensionados activos
+      - Auxilio externo activo
+    """
+
+    def get(self, request, *args, **kwargs):
+        from django.db.models import Sum, Count
+
+        periodo = request.query_params.get('periodo')
+        if not periodo:
+            return Response({'error': 'El parámetro "periodo" es requerido.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Planilla
+        planilla = PlanillaCalculo.objects.filter(periodo=periodo).order_by('-generada_en').first()
+        planilla_resumen = None
+        por_eps = []
+
+        if planilla:
+            planilla_resumen = {
+                'planilla_id': planilla.id,
+                'periodo': planilla.periodo,
+                'total_empleados': planilla.total_empleados,
+                'total_empresa': float(planilla.total_empresa),
+                'total_empleado': float(planilla.total_empleado),
+                'total_gravable': float(planilla.total_gravable),
+                'total_no_gravable': float(planilla.total_no_gravable),
+                'generada_en': planilla.generada_en,
+                'generada_por': planilla.generada_por,
+            }
+
+            por_eps_qs = (
+                DetalleCalculo.objects
+                .filter(planilla=planilla, estado_cruce='OK')
+                .values('eps')
+                .annotate(
+                    num_empleados=Count('id'),
+                    total_empresa=Sum('valor_empresa'),
+                    total_empleado=Sum('valor_empleado'),
+                    apoyo_no_gravable=Sum('apoyo_no_gravable'),
+                    apoyo_gravable=Sum('apoyo_gravable'),
+                )
+                .order_by('eps')
+            )
+            por_eps = [
+                {
+                    'eps': row['eps'],
+                    'num_empleados': row['num_empleados'],
+                    'total_empresa': float(row['total_empresa'] or 0),
+                    'total_empleado': float(row['total_empleado'] or 0),
+                    'apoyo_no_gravable': float(row['apoyo_no_gravable'] or 0),
+                    'apoyo_gravable': float(row['apoyo_gravable'] or 0),
+                }
+                for row in por_eps_qs
+            ]
+
+        # Pensionados activos
+        pensionados_qs = PensionadoPrepagada.objects.filter(activo=True)
+        pensionados = PensionadoPrepagadaSerializer(pensionados_qs, many=True).data
+        total_pensionados = float(
+            pensionados_qs.aggregate(total=Sum('valor_mensual'))['total'] or 0
+        )
+
+        # Auxilio externo activo
+        auxilio_qs = AuxilioExterno.objects.filter(activo=True)
+        auxilio_externo = AuxilioExternoSerializer(auxilio_qs, many=True).data
+        total_auxilio = float(
+            auxilio_qs.aggregate(total=Sum('valor_mensual'))['total'] or 0
+        )
+
+        # Totales consolidados
+        total_empresa = float(planilla.total_empresa) if planilla else 0
+        total_empleado = float(planilla.total_empleado) if planilla else 0
+
+        return Response({
+            'periodo': periodo,
+            'planilla_resumen': planilla_resumen,
+            'por_eps': por_eps,
+            'pensionados': {
+                'lista': pensionados,
+                'total': len(pensionados),
+                'total_valor': total_pensionados,
+            },
+            'auxilio_externo': {
+                'lista': auxilio_externo,
+                'total': len(auxilio_externo),
+                'total_valor': total_auxilio,
+            },
+            'consolidado': {
+                'total_empresa': round(total_empresa + total_pensionados, 2),
+                'total_empleado': round(total_empleado, 2),
+                'total_general': round(total_empresa + total_empleado + total_pensionados + total_auxilio, 2),
             },
         })

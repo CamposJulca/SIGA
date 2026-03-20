@@ -12,6 +12,7 @@ services:
       - siga_db:/app/db
     environment:
       - DEBUG=1
+      - PREPAGADA_DB_PATH=/app/db/prepagada.db
     restart: unless-stopped
 
 volumes:

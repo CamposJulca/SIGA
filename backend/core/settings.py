@@ -117,6 +117,12 @@ MEDIA_ROOT = BASE_DIR.parent / 'storage' / 'landing'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# --- Medicina Prepagada ---
+PREPAGADA_DB_PATH = os.environ.get(
+    'PREPAGADA_DB_PATH',
+    str(BASE_DIR / 'db' / 'prepagada.db')
+)
+
 # --- REST Framework ---
 REST_FRAMEWORK = {
     'DEFAULT_PARSER_CLASSES': [
