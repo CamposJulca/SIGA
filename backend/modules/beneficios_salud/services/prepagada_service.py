@@ -7,6 +7,8 @@ from decimal import Decimal
 
 from django.conf import settings
 
+from .eligibility import evaluar_elegibilidad
+
 
 def _get_connection():
     """Abre y retorna una conexión a prepagada.db."""
@@ -66,16 +68,15 @@ def calcular_planilla(periodo: str, politica) -> list:
     """
     Calcula la planilla 80/20 para un periodo dado usando la política indicada.
 
-    Para cada empleado en v_cruce:
-      - estado='OK'  → calcula distribución empresa/empleado y límite no gravable.
-      - otro estado  → incluye el registro pero con valores en cero.
+    Para cada registro en v_cruce:
+      - empleado elegible → calcula distribución empresa/empleado y límite no gravable.
+      - pensionado activo → deja 100% a cargo del pensionado/empleado.
+      - cruce no OK → incluye el registro bloqueado, con valores en cero.
 
     Retorna lista de dicts listos para crear DetalleCalculo.
     """
     rows = get_cruce_periodo(periodo)
 
-    pct_empresa = Decimal(str(politica.porcentaje_empresa))
-    pct_empleado = Decimal(str(politica.porcentaje_empleado))
     limite_no_grav = (
         Decimal(str(politica.uvt_limite)) * Decimal(str(politica.valor_uvt))
     )
@@ -91,27 +92,59 @@ def calcular_planilla(periodo: str, politica) -> list:
         tip_cont = r['tip_cont'] or ''
         estado = r['estado']
 
-        if estado != 'OK':
+        total = Decimal(str(r['total_familia'] or 0))
+        elegibilidad = evaluar_elegibilidad(r, politica)
+
+        if elegibilidad.estado_elegibilidad == 'PENSIONADO_100':
             resultados.append({
                 'cedula': cedula,
                 'nombre_en_factura': nombre_factura,
                 'nombre_en_kactus': nombre_kactus,
                 'eps': eps,
                 'num_beneficiarios': num_benef,
-                'total_familia': Decimal(str(r['total_familia'] or 0)),
+                'total_familia': total,
                 'valor_empresa': Decimal('0'),
-                'valor_empleado': Decimal('0'),
+                'valor_empleado': total,
                 'apoyo_no_gravable': Decimal('0'),
                 'apoyo_gravable': Decimal('0'),
                 'estado_cruce': estado,
+                'tipo_persona': elegibilidad.tipo_persona,
+                'estado_elegibilidad': elegibilidad.estado_elegibilidad,
+                'motivo_elegibilidad': elegibilidad.motivo_elegibilidad,
+                'porcentaje_empresa_aplicado': elegibilidad.porcentaje_empresa,
+                'porcentaje_empleado_aplicado': elegibilidad.porcentaje_empleado,
+                'valor_no_cubierto': Decimal('0'),
                 'sue_basi': sue_basi,
                 'tip_cont': tip_cont,
             })
             continue
 
-        total = Decimal(str(r['total_familia'] or 0))
-        valor_empresa = round(total * pct_empresa / 100, 2)
-        valor_empleado = round(total * pct_empleado / 100, 2)
+        if not elegibilidad.calcula_como_empleado_ok:
+            resultados.append({
+                'cedula': cedula,
+                'nombre_en_factura': nombre_factura,
+                'nombre_en_kactus': nombre_kactus,
+                'eps': eps,
+                'num_beneficiarios': num_benef,
+                'total_familia': total,
+                'valor_empresa': Decimal('0'),
+                'valor_empleado': Decimal('0'),
+                'apoyo_no_gravable': Decimal('0'),
+                'apoyo_gravable': Decimal('0'),
+                'estado_cruce': estado,
+                'tipo_persona': elegibilidad.tipo_persona,
+                'estado_elegibilidad': elegibilidad.estado_elegibilidad,
+                'motivo_elegibilidad': elegibilidad.motivo_elegibilidad,
+                'porcentaje_empresa_aplicado': elegibilidad.porcentaje_empresa,
+                'porcentaje_empleado_aplicado': elegibilidad.porcentaje_empleado,
+                'valor_no_cubierto': total,
+                'sue_basi': sue_basi,
+                'tip_cont': tip_cont,
+            })
+            continue
+
+        valor_empresa = round(total * elegibilidad.porcentaje_empresa / 100, 2)
+        valor_empleado = round(total * elegibilidad.porcentaje_empleado / 100, 2)
         apoyo_no_grav = min(valor_empresa, limite_no_grav)
         apoyo_grav = max(Decimal('0'), valor_empresa - limite_no_grav)
 
@@ -127,6 +160,12 @@ def calcular_planilla(periodo: str, politica) -> list:
             'apoyo_no_gravable': round(apoyo_no_grav, 2),
             'apoyo_gravable': round(apoyo_grav, 2),
             'estado_cruce': estado,
+            'tipo_persona': elegibilidad.tipo_persona,
+            'estado_elegibilidad': elegibilidad.estado_elegibilidad,
+            'motivo_elegibilidad': elegibilidad.motivo_elegibilidad,
+            'porcentaje_empresa_aplicado': elegibilidad.porcentaje_empresa,
+            'porcentaje_empleado_aplicado': elegibilidad.porcentaje_empleado,
+            'valor_no_cubierto': Decimal('0'),
             'sue_basi': sue_basi,
             'tip_cont': tip_cont,
         })

@@ -869,12 +869,20 @@ class PlanillaCalcularView(APIView):
         except RuntimeError as e:
             return Response({'error': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-        # Calcular totales (solo empleados con estado OK)
-        empleados_ok = [r for r in resultados if r['estado_cruce'] == 'OK']
-        total_empresa = sum(r['valor_empresa'] for r in empleados_ok)
-        total_empleado = sum(r['valor_empleado'] for r in empleados_ok)
-        total_gravable = sum(r['apoyo_gravable'] for r in empleados_ok)
-        total_no_gravable = sum(r['apoyo_no_gravable'] for r in empleados_ok)
+        # Calcular totales sobre registros liquidables. Los bloqueados quedan
+        # visibles en el detalle, pero no suman aportes de empresa/empleado.
+        liquidables = [
+            r for r in resultados
+            if r['estado_elegibilidad'] in ('ELEGIBLE_80_20', 'PENSIONADO_100')
+        ]
+        empleados_elegibles = [
+            r for r in resultados
+            if r['estado_elegibilidad'] == 'ELEGIBLE_80_20'
+        ]
+        total_empresa = sum(r['valor_empresa'] for r in liquidables)
+        total_empleado = sum(r['valor_empleado'] for r in liquidables)
+        total_gravable = sum(r['apoyo_gravable'] for r in liquidables)
+        total_no_gravable = sum(r['apoyo_no_gravable'] for r in liquidables)
 
         generada_por = 'anonimo'
         if request.user and request.user.is_authenticated:
@@ -883,7 +891,7 @@ class PlanillaCalcularView(APIView):
         planilla = PlanillaCalculo.objects.create(
             periodo=periodo,
             politica=politica,
-            total_empleados=len(empleados_ok),
+            total_empleados=len(empleados_elegibles),
             total_empresa=round(total_empresa, 2),
             total_empleado=round(total_empleado, 2),
             total_gravable=round(total_gravable, 2),
@@ -945,8 +953,14 @@ class PlanillaExportarView(APIView):
         ('eps', 'EPS'),
         ('num_beneficiarios', 'N° Beneficiarios'),
         ('total_familia', 'Total Familia'),
+        ('tipo_persona', 'Tipo Persona'),
+        ('estado_elegibilidad', 'Elegibilidad'),
+        ('motivo_elegibilidad', 'Motivo Elegibilidad'),
+        ('porcentaje_empresa_aplicado', '% Empresa'),
+        ('porcentaje_empleado_aplicado', '% Empleado'),
         ('valor_empresa', 'Valor Empresa'),
         ('valor_empleado', 'Valor Empleado'),
+        ('valor_no_cubierto', 'Valor No Cubierto'),
         ('apoyo_no_gravable', 'Apoyo No Gravable'),
         ('apoyo_gravable', 'Apoyo Gravable'),
         ('estado_cruce', 'Estado Cruce'),
@@ -967,7 +981,10 @@ class PlanillaExportarView(APIView):
         detalles = list(planilla.detalles.all().values(
             'cedula', 'nombre_en_kactus', 'eps', 'num_beneficiarios',
             'total_familia', 'valor_empresa', 'valor_empleado',
-            'apoyo_no_gravable', 'apoyo_gravable', 'estado_cruce',
+            'valor_no_cubierto', 'apoyo_no_gravable', 'apoyo_gravable',
+            'estado_cruce', 'tipo_persona', 'estado_elegibilidad',
+            'motivo_elegibilidad', 'porcentaje_empresa_aplicado',
+            'porcentaje_empleado_aplicado',
         ))
 
         wb = openpyxl.Workbook()

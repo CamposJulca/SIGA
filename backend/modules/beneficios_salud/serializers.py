@@ -167,6 +167,12 @@ class DetalleCalculoSerializer(serializers.ModelSerializer):
             'apoyo_no_gravable',
             'apoyo_gravable',
             'estado_cruce',
+            'tipo_persona',
+            'estado_elegibilidad',
+            'motivo_elegibilidad',
+            'porcentaje_empresa_aplicado',
+            'porcentaje_empleado_aplicado',
+            'valor_no_cubierto',
             'sue_basi',
             'tip_cont',
         ]
