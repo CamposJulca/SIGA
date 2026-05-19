@@ -34,7 +34,7 @@ siga/
 ## Levantamiento con Docker
 
 ```bash
-cd /home/desarrollo/Finagro/siga
+cd ~/Finagro/siga
 docker compose up --build -d
 
 # Migraciones
@@ -47,7 +47,7 @@ docker compose exec siga python manage.py createsuperuser
 ## Levantamiento local (desarrollo)
 
 ```bash
-cd /home/desarrollo/Finagro/siga/backend
+cd ~/Finagro/siga/backend
 pip install -r requirements.txt
 mkdir -p db
 python manage.py migrate
